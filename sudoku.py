@@ -1,4 +1,5 @@
 from typing import *
+from enum import IntEnum
 from dataclasses import dataclass, field
 from copy import *
 
@@ -168,6 +169,9 @@ class PartialSudoku:
 	def validate_full(self) -> bool:
 		return self.validate() and self.validate_notes()
 
+	def rebuild_notes(self) -> None:
+		self.board = Sudoku.from_fixed_numbers(self).board
+
 	def draw(self) -> None:
 		print("\033[G\033[s", end="") # move cursor to start of line and save position
 		print("\033[K\033[E" * 50, end="") # clear the next 50 lines
@@ -212,7 +216,7 @@ class Sudoku(PartialSudoku):
 					self.board = partial.board
 			case _:
 				super().__init__(*args, **kwargs)
-		if validated:
+		if validated or (not args and not kwargs):
 			return
 		if not self.validate():
 			raise ValueError("Invalid Sudoku board: violates Sudoku rules.")
@@ -234,53 +238,88 @@ class Sudoku(PartialSudoku):
 							if rr != r or cc != c:
 								self.board[rr][cc].value[num - 1] = False
 
+	def delete_note(self, row: SudokuIndex, col: SudokuIndex, num: SudokuInt) -> None:
+		cell = self.board[row][col]
+		cell_past_is_fixed_number = cell.is_fixed_number()
+		cell.value[num - 1] = False
+		if not cell_past_is_fixed_number and cell.is_fixed_number():
+			self.fill_number(row, col, cell.number)
+
 	@override
 	def fill_number(self, row: SudokuIndex, col: SudokuIndex, num: SudokuInt) -> None:
 		assert_sudoku_index(row)
 		assert_sudoku_index(col)
 		assert_sudoku_int(num)
 		self.board[row][col].number = num
-		update_list: List[Tuple[SudokuIndex, SudokuIndex]] = []
-		def update_notes(row: SudokuIndex, col: SudokuIndex) -> None:
-			cell = self.board[row][col]
-			cell_past_is_fixed_number = cell.is_fixed_number()
-			cell.value[num - 1] = False
-			if not cell_past_is_fixed_number and cell.is_fixed_number():
-				update_list.append((row, col))
 		for r in range(9):
 			if r != row:
-				update_notes(r, col)
+				self.delete_note(r, col, num)
 		for c in range(9):
 			if c != col:
-				update_notes(row, c)
+				self.delete_note(row, c, num)
 		for r in range(3 * (row // 3), 3 * (row // 3) + 3):
 			for c in range(3 * (col // 3), 3 * (col // 3) + 3):
 				if r != row or c != col:
-					update_notes(r, c)
-		for r, c in update_list:
-			self.fill_number(r, c, self.board[r][c].number)
+					self.delete_note(r, c, num)
 
 	@override
 	def validate(self) -> bool:
 		return all([cell.is_valid() for row in self.board for cell in row])
 
-class SudokuBackTrackingSolver:
-	def solve(self, sudoku: Sudoku) -> Optional[Sudoku]:
+	@classmethod
+	def from_fixed_numbers(cls, partial: PartialSudoku) -> Self:
+		retval = Sudoku()
 		for r in range(9):
 			for c in range(9):
-				if not sudoku.board[r][c].is_fixed_number():
-					for num in sorted(sudoku.board[r][c].notes):
-						sudoku_copy = deepcopy(sudoku)
-						try:
-							sudoku_copy.fill_number(r, c, num)
-							if sudoku_copy.validate():
-								solution = self.solve(sudoku_copy)
-								if solution is not None:
-									return solution
-						except ValueError:
-							continue
-					return None # No valid number found, backtrack
-		return sudoku # Solved
+				cell = partial.board[r][c]
+				if cell.is_fixed_number():
+					retval.fill_number(r, c, cell.number)
+		return cls(retval, copy_board=False, validated=True)
+
+SudokuSolverState = IntEnum("SudokuSolverState", ["SOLVED", "INVALID", "MULTI_ANSWER"], start=0)
+
+class SudokuSolver(Protocol):
+	def solve(self, sudoku: Sudoku) -> Tuple[SudokuSolverState, Optional[Sudoku]]: ...
+
+class SudokuBackTrackingSolver:
+	@staticmethod
+	def pick_next_cell(sudoku: Sudoku) -> Optional[Tuple[SudokuIndex, SudokuIndex]]:
+		# select cell with least notes(MRV)
+		cells = ((len(sudoku.board[r][c].notes), r, c) \
+			for r in range(9) for c in range(9) \
+			if not sudoku.board[r][c].is_fixed_number())
+		result = min(cells, key=lambda x: x[0], default=None)
+		return result[1:] if result else None
+
+	def solve(self, sudoku: Sudoku) -> Tuple[SudokuSolverState, Optional[Sudoku]]:
+		pos = self.pick_next_cell(sudoku)
+		if pos is None:
+			return (SudokuSolverState.SOLVED, sudoku)
+		r, c = pos
+		cell = sudoku.board[r][c]
+
+		solution: Optional[Sudoku] = None
+		for num in sorted(cell.notes):
+			sudoku_copy = deepcopy(sudoku)
+			sudoku_copy.fill_number(r, c, num)
+			if not sudoku_copy.validate():
+				return (SudokuSolverState.INVALID, None)
+			state, sol = self.solve(sudoku_copy)
+			match state:
+				case SudokuSolverState.INVALID:
+					continue
+				case SudokuSolverState.MULTI_ANSWER:
+					return (SudokuSolverState.MULTI_ANSWER, None)
+				case SudokuSolverState.SOLVED:
+					if solution is not None:
+						return (SudokuSolverState.MULTI_ANSWER, None)
+					solution = sol
+				case _:
+					assert_never(state)
+
+		if solution is None:
+			return (SudokuSolverState.INVALID, None)
+		return (SudokuSolverState.SOLVED, solution)
 
 class SudokuDancingLinksSolver:
 	class Node:
@@ -344,7 +383,7 @@ class SudokuDancingLinksSolver:
 		c.right.left = c
 		c.left.right = c
 
-	def solve(self, sudoku: Sudoku) -> Optional[Sudoku]:
+	def solve(self, sudoku: Sudoku) -> Tuple[SudokuSolverState, Optional[Sudoku]]:
 		root = SudokuDancingLinksSolver.Column()
 		cols: Dict[str, SudokuDancingLinksSolver.Column] = {}
 
@@ -413,10 +452,9 @@ class SudokuDancingLinksSolver:
 				cell = sudoku.board[r][c]
 				if cell.is_fixed_number():
 					d = cell.number
-					assert d is not None
 					rn = row_lookup.get((r, c, d))
 					if rn is None:
-						return None
+						return (SudokuSolverState.INVALID, None)
 					select_row(rn)
 
 		# Step 2: Search for solution using Algorithm X
@@ -433,42 +471,55 @@ class SudokuDancingLinksSolver:
 				j = j.right
 			return best
 
-		def search() -> bool:
+		def search() -> Tuple[SudokuSolverState, Optional[Sudoku]]:
 			if root.right is root:
-				return True
+				# Step3: Reconstruct solution from selected rows
+				result = Sudoku()
+				for n in solution_nodes:
+					if n.row_id is None:
+						continue
+					r, c, d = n.row_id
+					result.board[r][c].number = d
+				return (SudokuSolverState.SOLVED, result)
+
 			c = choose_column()
 			if c is None or c.size == 0:
-				return False
+				return (SudokuSolverState.INVALID, None)
 			self.cover(c)
-			rn = c.down
-			while rn is not c:
-				solution_nodes.append(rn)
-				j = rn.right
-				while j is not rn:
-					self.cover(j.col)
-					j = j.right
-				if search():
-					return True
-				solution_nodes.pop()
-				j = rn.left
-				while j is not rn:
-					self.uncover(j.col)
-					j = j.left
-				rn = rn.down
-			self.uncover(c)
-			return False
+			try:
+				solution: Optional[Sudoku] = None
 
-		if not search():
-			return None
+				rn = c.down
+				while rn is not c:
+					solution_nodes.append(rn)
+					j = rn.right
+					while j is not rn:
+						self.cover(j.col)
+						j = j.right
+					state, sol = search()
+					solution_nodes.pop()
+					j = rn.left
+					while j is not rn:
+						self.uncover(j.col)
+						j = j.left
+					match state:
+						case SudokuSolverState.INVALID:
+							pass
+						case SudokuSolverState.MULTI_ANSWER:
+							return (SudokuSolverState.MULTI_ANSWER, None)
+						case SudokuSolverState.SOLVED:
+							if solution is not None:
+								return (SudokuSolverState.MULTI_ANSWER, None)
+							solution = sol
+					rn = rn.down
 
-		# Step 3: Construct solution from selected rows
-		result = deepcopy(sudoku)
-		for n in solution_nodes:
-			if n.row_id is None:
-				continue
-			r, c, d = n.row_id
-			result.board[r][c].number = d
-		return result
+				if solution is None:
+					return (SudokuSolverState.INVALID, None)
+				return (SudokuSolverState.SOLVED, solution)
+			finally:
+				self.uncover(c)
+
+		return search()
 
 class SudokuHumanFriendlySolver:
 	def a_very_basic_solve_process(self, sudoku: Sudoku) -> Optional[Sudoku]:
@@ -553,6 +604,7 @@ class SudokuInteractive:
 class Test:
 	board = "12.45.7.....4.67.9.2.4.67..1..4.6..9.......8...3.......2..567.9...4567.9.2.45....1..4..7.....4.6789...4.678.....5....1..4.6....2.........3..67.9...4.67.9..34...8..2.45.......4.6.89..3.........4.6..9...4.6.........7..1...........456..9.2.45..8...34..7......5............91..4.6.8.1..4.6...1..4.6.8...3...7...2.......1.3.............8...34..7.....4..7...2...............91..4.......3.5.7..1...5.7.......6........6....2.......1..........3............7......5.......4............8.........9........91............5.......4.6....2..........4.6..........8...3............7...234..7....34.67...2.4.67..1......8.....5....1......8..2...6..9...4.6..9.2.4......2.4........4.6.8..2.4.6.8.......7....3..............9.2..56...1..456...12.45...."
 	solved = "......7.......6....2.......1...............8...3..............9...4.........5....1................9...4.........5.........6....2.........3............7.........8.....5...........8...3..............9...4...........7..1.............6....2..........4.........5............9.....6...1...............8.......7...2.........3.............8...3............7...2...............9...4.........5....1.............6........6....2.......1..........3............7......5.......4............8.........9........91............5.......4......2............6..........8...3............7....3............7.......6..........8.....5....1.........2...............9...4......2..........4............8.......7....3..............9.....6.......5....1........"
+	multi = "12.............7......5....12..............8.........9.....6......4.......3......12............6......4.....12.........3............7......5...........8.........9........9..3.............8.....5.......4..........6.........7...2.......1..........3......1................9.......8.......7......5.......4..........6....2............6.......5..........7..........9.2..........4.....1..........3.............8....4............8..2............6...1..........3..............9....5..........7.........8..2............6......4.............91..........3............7......5........5............9..3............7.......6..........8..2.......1...........4...........7.....4.....1..........3..........5.....2..............8.........9.....6..."
 
 	def test_serialize_and_equal(self):
 		su = PartialSudoku.deserialize(self.board)
@@ -602,14 +654,22 @@ class Test:
 		assert not su_f.validate()
 
 	def test_backtracking_solve(self):
-		su = PartialSudoku.deserialize(self.board)
-		solution = SudokuBackTrackingSolver().solve(Sudoku(su, validated=True))
+		su = Sudoku.deserialize(self.board)
+		state, solution = SudokuBackTrackingSolver().solve(su)
+		assert state == SudokuSolverState.SOLVED
 		assert solution == PartialSudoku.deserialize(self.solved)
+		multi = Sudoku.deserialize(self.multi)
+		state, solution = SudokuBackTrackingSolver().solve(multi)
+		assert state == SudokuSolverState.MULTI_ANSWER
 
 	def test_dancinglinks_solve(self):
-		su = PartialSudoku.deserialize(self.board)
-		solution = SudokuDancingLinksSolver().solve(Sudoku(su, validated=True))
+		su = Sudoku.deserialize(self.board)
+		state, solution = SudokuDancingLinksSolver().solve(su)
+		assert state == SudokuSolverState.SOLVED
 		assert solution == PartialSudoku.deserialize(self.solved)
+		multi = Sudoku.deserialize(self.multi)
+		state, solution = SudokuDancingLinksSolver().solve(multi)
+		assert state == SudokuSolverState.MULTI_ANSWER
 
 if __name__ == "__main__":
 	t = Test()
