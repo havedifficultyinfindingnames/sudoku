@@ -336,7 +336,7 @@ class SudokuDancingLinksSolver:
 			self.right: SudokuDancingLinksSolver.Node = self
 			self.up: SudokuDancingLinksSolver.Node = self
 			self.down: SudokuDancingLinksSolver.Node = self
-			self.col: SudokuDancingLinksSolver.Column = None  # type: ignore[assignment]
+			self.col: SudokuDancingLinksSolver.Column = None # type: ignore[assignment]
 			self.row_id: Optional[Tuple[SudokuIndex, SudokuIndex, SudokuInt]] = None # (r,c,d)
 
 	class Column(Node):
@@ -588,8 +588,7 @@ class SudokuHumanFriendlySolver:
 					for d in ds:
 						union_cells |= digit_to_cells[d]
 					if len(union_cells) != k:
-						# not hidden subset
-						continue
+						continue # not hidden subset
 
 					su = deepcopy(sudoku)
 					allowed: Set[SudokuInt] = set(ds)
@@ -626,8 +625,7 @@ class SudokuHumanFriendlySolver:
 					for r, c in cs:
 						union_digits |= sudoku.board[r][c].notes
 					if len(union_digits) != k:
-						# not naked subset
-						continue
+						continue # not naked subset
 
 					su = deepcopy(sudoku)
 					to_remove: Set[SudokuInt] = union_digits
@@ -663,8 +661,7 @@ class SudokuHumanFriendlySolver:
 				for d in range(1, 10):
 					pos = [(r, c) for (r, c) in box if (not sudoku.board[r][c].is_fixed_number()) and (d in sudoku.board[r][c].notes)]
 					if len(pos) < 2:
-						# not locked candidate, one number in at least 2 candidate cells needed to form a pattern
-						continue
+						continue # not locked candidate, one number in at least 2 candidate cells needed to form a pattern
 
 					rows = {r for r, _ in pos}
 					cols = {c for _, c in pos}
@@ -676,8 +673,7 @@ class SudokuHumanFriendlySolver:
 						changed = False
 						for c in range(9):
 							if c in box_cs:
-								# not notes in box
-								continue
+								continue # not notes in box
 							cell = su.board[target_r][c]
 							if cell.is_fixed_number():
 								continue
@@ -720,6 +716,20 @@ class SudokuHumanFriendlySolver:
 		)
 
 	@staticmethod
+	def median_technique() -> Step:
+		return SudokuHumanFriendlySolver.choice(
+			SudokuHumanFriendlySolver.simple_technique(),
+			SudokuHumanFriendlySolver.identity
+		)
+	
+	@staticmethod
+	def hard_technique() -> Step:
+		return SudokuHumanFriendlySolver.choice(
+			SudokuHumanFriendlySolver.median_technique(),
+			SudokuHumanFriendlySolver.identity
+		)
+
+	@staticmethod
 	def next_technique() -> Step:
 		return SudokuHumanFriendlySolver.choice(
 			SudokuHumanFriendlySolver.hidden_subset,
@@ -751,16 +761,17 @@ class SudokuHumanFriendlySolver:
 		return (SudokuSolverState.INVALID, None)
 
 class SudokuGenerator:
-	@staticmethod
-	def generate() -> Sudoku:
+	_seed = None
+
+	def generate(self, difficulty: Literal["simple", "median", "hard", "impossible"] = "simple") -> Sudoku:
 		import random
-		dlx = SudokuDancingLinksSolver()
+		random.seed(self._seed)
 
 		def generate_unique_puzzle() -> Sudoku:
 			puzzle = Sudoku()
 			positions = [(r, c) for r in range(9) for c in range(9)]
 			random.shuffle(positions)
-			for r, c in positions[:30]:
+			for r, c in positions[:36]:
 				if puzzle.board[r][c].is_fixed_number():
 					continue
 				candidates = puzzle.board[r][c].notes
@@ -769,11 +780,10 @@ class SudokuGenerator:
 				if not puzzle.validate():
 					puzzle = puzzle_old
 					continue
-				state, _ = dlx.solve(puzzle)
+				state, _ = SudokuDancingLinksSolver.solve(puzzle)
 				if state == SudokuSolverState.SOLVED:
 					return puzzle
-			# Too many givens, retry generation
-			return SudokuGenerator.generate()
+			return self.generate() # Too many givens, regenerate
 
 		puzzle = generate_unique_puzzle()
 
@@ -786,12 +796,34 @@ class SudokuGenerator:
 				puzzle_new.rebuild_notes() # Rebuild notes to reflect the removal
 				if puzzle == puzzle_new:
 					continue # More removals may help, but I don't know how to handle it
-				state, _ = dlx.solve(puzzle_new)
+				state, _ = SudokuDancingLinksSolver.solve(puzzle_new)
 				if state == SudokuSolverState.SOLVED:
 					puzzle = puzzle_new
 			return puzzle
 
-		return further_remove_cells(puzzle)
+		puzzle = further_remove_cells(puzzle)
+
+		match difficulty:
+			case "simple":
+				solver = SudokuHumanFriendlySolver.identity
+			case "median":
+				solver = SudokuHumanFriendlySolver.simple_technique()
+			case "hard":
+				solver = SudokuHumanFriendlySolver.median_technique()
+			case "impossible":
+				solver = SudokuHumanFriendlySolver.hard_technique()
+			case _:
+				assert_never(difficulty)
+		while True:
+			progress, solution = solver(puzzle)
+			if not progress:
+				break
+			assert solution
+			puzzle = solution
+
+		if all(cell.is_fixed_number() for row in puzzle.board for cell in row):
+			return self.generate(difficulty) # Regenerate if the puzzle is already solved
+		return puzzle
 
 class SudokuInteractive:
 	def __init__(self, sudoku: PartialSudoku):
@@ -924,7 +956,7 @@ class Test:
 
 	def test_puzzle_generation(self):
 		for _ in range(5):
-			puzzle = SudokuGenerator.generate()
+			puzzle = SudokuGenerator().generate()
 			state, _ = SudokuDancingLinksSolver().solve(puzzle)
 			assert state == SudokuSolverState.SOLVED
 
