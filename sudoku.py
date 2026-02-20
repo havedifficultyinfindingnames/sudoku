@@ -1,7 +1,8 @@
 from typing import *
-from enum import IntEnum
-from dataclasses import dataclass, field
 from copy import *
+from enum import IntEnum
+from itertools import combinations
+from dataclasses import dataclass, field
 
 # Contract that SudokuInt is an int between 1 and 9 inclusive, no enforcement to check
 SudokuInt = int
@@ -522,26 +523,93 @@ class SudokuDancingLinksSolver:
 		return search()
 
 class SudokuHumanFriendlySolver:
-	def a_very_basic_solve_process(self, sudoku: Sudoku) -> Optional[Sudoku]:
+	def _iter_units(self) -> Generator[List[Tuple[SudokuIndex, SudokuIndex]]]:
+		# row units
+		for r in range(9):
+			yield [(r, c) for c in range(9)]
+		# col units
+		for c in range(9):
+			yield [(r, c) for r in range(9)]
+		# box units
+		for br in range(3):
+			for bc in range(3):
+				yield [(br * 3 + dr, bc * 3 + dc) for dr in range(3) for dc in range(3)]
+
+	def hidden_subset(self, sudoku: Sudoku) -> Tuple[bool, Optional[Sudoku]]:
+		"""
+		Hidden Subset is a technique that identifies a subset of k digits that only appear in k cells within a unit (row, column, or box). If such a subset is found, those k cells must contain those k digits, and any other candidates can be removed from those cells.
+		"""
+		# k can be at most 9 // 2
+		for k in range(1, 4):
+			for unit in self._iter_units():
+				fixed = set(sudoku.board[r][c].number for r, c in unit if sudoku.board[r][c].is_fixed_number())
+
+				# digit -> candidate cells in this unit
+				digit_to_cells: Dict[SudokuInt, Set[Tuple[SudokuIndex, SudokuIndex]]] = {}
+				for d in range(1, 10):
+					if d in fixed:
+						continue
+					pos = set((r, c) for r, c in unit if not sudoku.board[r][c].is_fixed_number() and d in sudoku.board[r][c].notes)
+					if pos:
+						digit_to_cells[d] = pos
+
+				digits = sorted(digit_to_cells.keys())
+				if len(digits) < k:
+					continue
+				for ds in combinations(digits, k):
+					union_cells: Set[Tuple[SudokuIndex, SudokuIndex]] = set()
+					for d in ds:
+						union_cells |= digit_to_cells[d]
+					if len(union_cells) != k:
+						# not hidden subset
+						continue
+
+					su = deepcopy(sudoku)
+					allowed: Set[SudokuInt] = set(ds)
+					changed = False
+					for (r, c) in union_cells:
+						cell = su.board[r][c]
+						if cell.is_fixed_number():
+							continue
+						to_remove = cell.notes - allowed
+						for num in sorted(to_remove):
+							su.delete_note(r, c, num)
+							changed = True
+					if changed:
+						if not su.validate():
+							return (False, None)
+						return (True, su)
+
+		return (False, sudoku)
+
+	def a_very_basic_solve_process(self, sudoku: Sudoku) -> Tuple[bool, Optional[Sudoku]]:
 		raise NotImplementedError("Human-friendly solver not implemented yet.")
 
-	def solve_step_by_step(self, sudoku: Sudoku) -> Generator[Optional[Sudoku], Optional[Callable[[SudokuHumanFriendlySolver, Sudoku], Optional[Sudoku]]], Optional[Sudoku]]:
+	def choose_next_technic(self) -> Callable[[SudokuHumanFriendlySolver, Sudoku], Tuple[bool, Optional[Sudoku]]]:
+		raise NotImplementedError("Human-friendly solver not implemented yet.")
+		return SudokuHumanFriendlySolver.a_very_basic_solve_process
+
+	def solve_step_by_step(self, sudoku: Sudoku) -> Generator[
+		Tuple[bool, Optional[Sudoku]],
+		Optional[Callable[[SudokuHumanFriendlySolver, Sudoku], Tuple[bool, Optional[Sudoku]]]],
+		Optional[Sudoku]]:
+		progress = False
 		step = sudoku
 		while True:
-			next_step_func = yield step
+			next_step_func = yield (progress, step)
 			if next_step_func is None:
-				next_step_func = SudokuHumanFriendlySolver.a_very_basic_solve_process
-			step = next_step_func(self, step)
+				next_step_func = self.choose_next_technic()
+			progress, step = next_step_func(self, step)
 			if step is None:
 				return None
 			if all(cell.is_fixed_number() for row in step.board for cell in row):
 				return step
 	def solve(self, sudoku: Sudoku) -> Optional[Sudoku]:
-		step: Optional[Sudoku] = None
-		for step in self.solve_step_by_step(sudoku):
-			if step is None:
-				return None
-		return step
+		for _ in self.solve_step_by_step(sudoku): pass
+		try:
+			next(self.solve_step_by_step(sudoku))
+		except StopIteration as e:
+			return e.value
 
 class SudokuGenerator:
 	@staticmethod
