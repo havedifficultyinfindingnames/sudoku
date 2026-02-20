@@ -66,31 +66,6 @@ class PartialSudoku:
 			value = [(c != blank) for c in text]
 			return cls(value)
 
-		def draw(self, is_fixed: bool = False) -> None:
-			W, H = 5, 5
-			def pad5(s: str) -> str:
-				s = s[:W]
-				return s + (" " * (W - len(s)))
-			lines = [pad5("") for _ in range(H)]
-
-			if self.is_fixed_number():
-				mid = f"<{self.number}>" if is_fixed else f"*{self.number}*"
-				lines[2] = pad5(" " + mid + " ")
-			else:
-				def ch(n: int) -> str:
-					return str(n) if self.value[n - 1] else "."
-				lines[1] = pad5(" " + "".join(ch(n) for n in (1, 2, 3)) + " ")
-				lines[2] = pad5(" " + "".join(ch(n) for n in (4, 5, 6)) + " ")
-				lines[3] = pad5(" " + "".join(ch(n) for n in (7, 8, 9)) + " ")
-
-			print("\033[s", end="") # save cursor position
-			for r, line in enumerate(lines):
-				if r == 0:
-					print(f"\033[u{line}", end="")
-				else:
-					print(f"\033[u\033[{r}B{line}", end="")
-			print("\033[u\033[5C", end="") # restore cursor position and move right for next cell
-
 	board: List[List[Cell]] = field(default_factory=lambda: [[PartialSudoku.Cell() for _ in range(9)] for _ in range(9)])
 
 	def __post_init__(self) -> None:
@@ -174,31 +149,43 @@ class PartialSudoku:
 		self.board = Sudoku.from_fixed_numbers(self).board
 
 	def draw(self) -> None:
-		print("\033[G\033[s", end="") # move cursor to start of line and save position
-		print("\033[K\033[E" * 50, end="") # clear the next 50 lines
-		print("\033[u", end="") # move cursor back to start of line
-		CELL_W, CELL_H = 5, 5
-		VSEP_W = 1
-		TOTAL_W = 9 * CELL_W + 2 * VSEP_W
-		def draw_vsep() -> None:
-			print("\033[s", end="")
-			for r in range(CELL_H):
-				if r == 0:
-					print("\033[u|", end="")
-				else:
-					print(f"\033[u\033[{r}B|", end="")
-			print("\033[u\033[1C", end="")
-
-		for i, row in enumerate(self.board):
-			if i % 3 == 0 and i != 0:
-				print("\r\n" + ("-" * TOTAL_W) + "\r\n", end="")
-			for j, cell in enumerate(row):
-				cell.draw(is_fixed=False)
-				if j % 3 == 2 and j != 8:
-					draw_vsep()
-			print("\r\n" * CELL_H, end="")
-
-		print("", end="", flush=True)
+		def cell_3x3(r: int, c: int) -> List[str]:
+			cell = self.board[r][c]
+			if cell.is_fixed_number():
+				return ["   ", f"*{cell.number}*", "   "]
+			has = set(cell.notes)
+			return [
+				"".join(str(d) if d in has else "." for d in (1, 2, 3)),
+				"".join(str(d) if d in has else "." for d in (4, 5, 6)),
+				"".join(str(d) if d in has else "." for d in (7, 8, 9)),
+			]
+		gap = " " * 3
+		margin = " " * 2
+		seg_content_w = 3 * 3 + 2 * len(gap)
+		seg_w = seg_content_w + 2 * len(margin)
+		top = "┌" + "─" * seg_w + "┬" + "─" * seg_w + "┬" + "─" * seg_w + "┐"
+		mid = "├" + "─" * seg_w + "┼" + "─" * seg_w + "┼" + "─" * seg_w + "┤"
+		bot = "└" + "─" * seg_w + "┴" + "─" * seg_w + "┴" + "─" * seg_w + "┘"
+		def seg_line(parts3: List[str]) -> str:
+			content = gap.join(parts3)
+			return f"{margin}{content}{margin}"
+		def spacer_line() -> str:
+			return f"│{' ' * seg_w}│{' ' * seg_w}│{' ' * seg_w}│"
+		print(top)
+		for r in range(9):
+			cells = [cell_3x3(r, c) for c in range(9)]
+			for sr in range(3):
+				seg0 = seg_line([cells[c][sr] for c in range(0, 3)])
+				seg1 = seg_line([cells[c][sr] for c in range(3, 6)])
+				seg2 = seg_line([cells[c][sr] for c in range(6, 9)])
+				print(f"│{seg0}│{seg1}│{seg2}│")
+			match r:
+				case 2 | 5:
+					print(mid)
+				case 8:
+					print(bot)
+				case _:
+					print(spacer_line())
 
 	def interactive_mode(self) -> SudokuInteractive:
 		return SudokuInteractive(self)
@@ -788,9 +775,11 @@ class Test:
 			state, _ = SudokuDancingLinksSolver().solve(puzzle)
 			assert state == SudokuSolverState.SOLVED
 
-if __name__ == "__main__":
-	t = Test()
-	for name, func in Test.__dict__.items():
-		if isinstance(func, Callable) and not name.startswith("_"):
-			print(f"Running {name}...")
-			func(t)
+# if __name__ == "__main__":
+# 	t = Test()
+# 	for name, func in Test.__dict__.items():
+# 		if isinstance(func, Callable) and not name.startswith("_"):
+# 			print(f"Running {name}...")
+# 			func(t)
+
+Sudoku.deserialize(Test.board).draw()
