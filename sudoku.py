@@ -86,6 +86,19 @@ class PartialSudoku:
 			for i in range(9)
 		])
 
+	@staticmethod
+	def iter_units() -> Generator[List[Tuple[SudokuIndex, SudokuIndex]]]:
+		# row units
+		for r in range(9):
+			yield [(r, c) for c in range(9)]
+		# col units
+		for c in range(9):
+			yield [(r, c) for r in range(9)]
+		# box units
+		for br in range(3):
+			for bc in range(3):
+				yield [(3 * br + r, 3 * bc + c) for r in range(3) for c in range(3)]
+
 	def fill_number(self, row: SudokuIndex, col: SudokuIndex, num: SudokuInt) -> None:
 		assert_sudoku_index(row)
 		assert_sudoku_index(col)
@@ -252,7 +265,12 @@ class Sudoku(PartialSudoku):
 
 	@override
 	def validate(self) -> bool:
-		return all([cell.is_valid() for row in self.board for cell in row])
+		in_cell_valid = all([cell.is_valid() for row in self.board for cell in row])
+		cross_cell_valid = all(
+			{d for r, c in unit for d in self.board[r][c].notes} == set(range(1, 10))
+			for unit in self.iter_units()
+		)
+		return in_cell_valid and cross_cell_valid
 
 	@classmethod
 	def from_fixed_numbers(cls, partial: PartialSudoku) -> Self:
@@ -267,7 +285,8 @@ class Sudoku(PartialSudoku):
 SudokuSolverState = IntEnum("SudokuSolverState", ["SOLVED", "INVALID", "MULTI_ANSWER"], start=0)
 
 class SudokuSolver(Protocol):
-	def solve(self, sudoku: Sudoku) -> Tuple[SudokuSolverState, Optional[Sudoku]]: ...
+	@staticmethod
+	def solve(sudoku: Sudoku) -> Tuple[SudokuSolverState, Optional[Sudoku]]: ...
 
 class SudokuBackTrackingSolver:
 	@staticmethod
@@ -279,8 +298,9 @@ class SudokuBackTrackingSolver:
 		result = min(cells, key=lambda x: x[0], default=None)
 		return result[1:] if result else None
 
-	def solve(self, sudoku: Sudoku) -> Tuple[SudokuSolverState, Optional[Sudoku]]:
-		pos = self.pick_next_cell(sudoku)
+	@staticmethod
+	def solve(sudoku: Sudoku) -> Tuple[SudokuSolverState, Optional[Sudoku]]:
+		pos = SudokuBackTrackingSolver.pick_next_cell(sudoku)
 		if pos is None:
 			return (SudokuSolverState.SOLVED, sudoku)
 		r, c = pos
@@ -292,7 +312,7 @@ class SudokuBackTrackingSolver:
 			sudoku_copy.fill_number(r, c, num)
 			if not sudoku_copy.validate():
 				return (SudokuSolverState.INVALID, None)
-			state, sol = self.solve(sudoku_copy)
+			state, sol = SudokuBackTrackingSolver.solve(sudoku_copy)
 			match state:
 				case SudokuSolverState.INVALID:
 					continue
@@ -371,7 +391,8 @@ class SudokuDancingLinksSolver:
 		c.right.left = c
 		c.left.right = c
 
-	def solve(self, sudoku: Sudoku) -> Tuple[SudokuSolverState, Optional[Sudoku]]:
+	@staticmethod
+	def solve(sudoku: Sudoku) -> Tuple[SudokuSolverState, Optional[Sudoku]]:
 		root = SudokuDancingLinksSolver.Column()
 		cols: Dict[str, SudokuDancingLinksSolver.Column] = {}
 
@@ -421,7 +442,7 @@ class SudokuDancingLinksSolver:
 						nodes[i].left = nodes[(i - 1) % 4]
 					# add to columns
 					for col, n in zip(col_list, nodes):
-						self.link_ud(col, n)
+						SudokuDancingLinksSolver.link_ud(col, n)
 					row_lookup[(r, c, d)] = nodes[0]
 
 		solution_nodes: List[SudokuDancingLinksSolver.Node] = []
@@ -431,7 +452,7 @@ class SudokuDancingLinksSolver:
 			solution_nodes.append(rn)
 			j = rn
 			while True:
-				self.cover(j.col)
+				SudokuDancingLinksSolver.cover(j.col)
 				j = j.right
 				if j is rn:
 					break
@@ -473,7 +494,7 @@ class SudokuDancingLinksSolver:
 			c = choose_column()
 			if c is None or c.size == 0:
 				return (SudokuSolverState.INVALID, None)
-			self.cover(c)
+			SudokuDancingLinksSolver.cover(c)
 			try:
 				solution: Optional[Sudoku] = None
 
@@ -482,13 +503,13 @@ class SudokuDancingLinksSolver:
 					solution_nodes.append(rn)
 					j = rn.right
 					while j is not rn:
-						self.cover(j.col)
+						SudokuDancingLinksSolver.cover(j.col)
 						j = j.right
 					state, sol = search()
 					solution_nodes.pop()
 					j = rn.left
 					while j is not rn:
-						self.uncover(j.col)
+						SudokuDancingLinksSolver.uncover(j.col)
 						j = j.left
 					match state:
 						case SudokuSolverState.INVALID:
@@ -505,30 +526,49 @@ class SudokuDancingLinksSolver:
 					return (SudokuSolverState.INVALID, None)
 				return (SudokuSolverState.SOLVED, solution)
 			finally:
-				self.uncover(c)
+				SudokuDancingLinksSolver.uncover(c)
 
 		return search()
 
 class SudokuHumanFriendlySolver:
-	def _iter_units(self) -> Generator[List[Tuple[SudokuIndex, SudokuIndex]]]:
-		# row units
-		for r in range(9):
-			yield [(r, c) for c in range(9)]
-		# col units
-		for c in range(9):
-			yield [(r, c) for r in range(9)]
-		# box units
-		for br in range(3):
-			for bc in range(3):
-				yield [(br * 3 + dr, bc * 3 + dc) for dr in range(3) for dc in range(3)]
+	Step = Callable[[Sudoku], Tuple[bool, Optional[Sudoku]]]
+	
+	@staticmethod
+	def choice(*steps: Step) -> Step:
+		def run(sudoku: Sudoku) -> Tuple[bool, Optional[Sudoku]]:
+			for step in steps:
+				progress, solution = step(sudoku)
+				if solution is None:
+					return (False, None)
+				if progress:
+					return (True, solution)
+			return (False, sudoku)
+		return run
+	
+	@staticmethod
+	def many(step: Step) -> Callable[[Sudoku], Optional[Sudoku]]:
+		def run(sudoku: Sudoku) -> Optional[Sudoku]:
+			while True:
+				progress, solution = step(sudoku)
+				if solution is None:
+					return None
+				if not progress:
+					return sudoku
+				sudoku = solution
+		return run
 
-	def hidden_subset(self, sudoku: Sudoku) -> Tuple[bool, Optional[Sudoku]]:
+	@staticmethod
+	def identity(sudoku: Sudoku) -> Tuple[bool, Optional[Sudoku]]:
+		return (False, sudoku)
+
+	@staticmethod
+	def hidden_subset(sudoku: Sudoku) -> Tuple[bool, Optional[Sudoku]]:
 		"""
 		Hidden Subset is a technique that identifies a subset of k digits that only appear in k cells within a unit (row, column, or box). If such a subset is found, those k cells must contain those k digits, and any other candidates can be removed from those cells.
 		"""
 		# k can be at most 9 // 2
-		for k in range(1, 4):
-			for unit in self._iter_units():
+		for k in range(1, 5):
+			for unit in Sudoku.iter_units():
 				fixed = set(sudoku.board[r][c].number for r, c in unit if sudoku.board[r][c].is_fixed_number())
 
 				# digit -> candidate cells in this unit
@@ -568,35 +608,147 @@ class SudokuHumanFriendlySolver:
 						return (True, su)
 
 		return (False, sudoku)
+	
+	@staticmethod
+	def naked_subset(sudoku: Sudoku) -> Tuple[bool, Optional[Sudoku]]:
+		"""
+		Naked Subset is a technique that identifies a subset of k cells within a unit (row, column, or box) that contain only k candidates in total. If such a subset is found, those k candidates must be placed in those k cells, and any other candidates can be removed from those cells.
+		"""
+		# k can be at most 9 // 2
+		# k == 1 (which is naked single) is already handled by Cell
+		for k in range(2, 5):
+			for unit in Sudoku.iter_units():
+				cells = [(r, c) for r, c in unit if not sudoku.board[r][c].is_fixed_number()]
+				if len(cells) < k:
+					continue
+				for cs in combinations(cells, k):
+					union_digits: Set[SudokuInt] = set()
+					for r, c in cs:
+						union_digits |= sudoku.board[r][c].notes
+					if len(union_digits) != k:
+						# not naked subset
+						continue
 
-	def a_very_basic_solve_process(self, sudoku: Sudoku) -> Tuple[bool, Optional[Sudoku]]:
-		raise NotImplementedError("Human-friendly solver not implemented yet.")
+					su = deepcopy(sudoku)
+					to_remove: Set[SudokuInt] = union_digits
+					changed = False
+					for (r, c) in unit:
+						if (r, c) in cs:
+							continue
+						cell = su.board[r][c]
+						if cell.is_fixed_number():
+							continue
+						to_remove_cell = cell.notes & to_remove
+						for num in sorted(to_remove_cell):
+							su.delete_note(r, c, num)
+							changed = True
+					if changed:
+						if not su.validate():
+							return (False, None)
+						return (True, su)
 
-	def choose_next_technic(self) -> Callable[[SudokuHumanFriendlySolver, Sudoku], Tuple[bool, Optional[Sudoku]]]:
-		raise NotImplementedError("Human-friendly solver not implemented yet.")
-		return SudokuHumanFriendlySolver.a_very_basic_solve_process
+		return (False, sudoku)
 
-	def solve_step_by_step(self, sudoku: Sudoku) -> Generator[
-		Tuple[bool, Optional[Sudoku]],
-		Optional[Callable[[SudokuHumanFriendlySolver, Sudoku], Tuple[bool, Optional[Sudoku]]]],
-		Optional[Sudoku]]:
-		progress = False
-		step = sudoku
+	@staticmethod
+	def locked_candidate(sudoku: Sudoku) -> Tuple[bool, Optional[Sudoku]]:
+		"""
+		Locked Candidate is a technique that identifies a candidate digit that is confined to a single row or column within a box. If such a candidate is found, it can be removed from the corresponding row or column outside of that box.
+		"""
+		for br in range(3):
+			for bc in range(3):
+				box = [(3 * br + r, 3 * bc + c) for r in range(3) for c in range(3)]
+				box_rs = {r for r, _ in box}
+				box_cs = {c for _, c in box}
+
+				for d in range(1, 10):
+					pos = [(r, c) for (r, c) in box if (not sudoku.board[r][c].is_fixed_number()) and (d in sudoku.board[r][c].notes)]
+					if len(pos) < 2:
+						# not locked candidate, one number in at least 2 candidate cells needed to form a pattern
+						continue
+
+					rows = {r for r, _ in pos}
+					cols = {c for _, c in pos}
+
+					# pointing -> row
+					if len(rows) == 1:
+						target_r = next(iter(rows))
+						su = deepcopy(sudoku)
+						changed = False
+						for c in range(9):
+							if c in box_cs:
+								# not notes in box
+								continue
+							cell = su.board[target_r][c]
+							if cell.is_fixed_number():
+								continue
+							if d in cell.notes:
+								su.delete_note(target_r, c, d)
+								changed = True
+						if changed:
+							if not su.validate():
+								return (False, None)
+							return (True, su)
+
+					# pointing -> col
+					if len(cols) == 1:
+						target_c = next(iter(cols))
+						su = deepcopy(sudoku)
+						changed = False
+						for r in range(9):
+							if r in box_rs:
+								continue
+							cell = su.board[r][target_c]
+							if cell.is_fixed_number():
+								continue
+							if cell.value[d - 1]:
+								su.delete_note(r, target_c, d)
+								changed = True
+						if changed:
+							if not su.validate():
+								return (False, None)
+							return (True, su)
+
+		return (False, sudoku)
+
+	@staticmethod
+	def simple_technique() -> Step:
+		return SudokuHumanFriendlySolver.choice(
+			SudokuHumanFriendlySolver.identity,
+			SudokuHumanFriendlySolver.hidden_subset,
+			SudokuHumanFriendlySolver.naked_subset,
+			SudokuHumanFriendlySolver.locked_candidate,
+		)
+
+	@staticmethod
+	def next_technique() -> Step:
+		return SudokuHumanFriendlySolver.choice(
+			SudokuHumanFriendlySolver.hidden_subset,
+			SudokuHumanFriendlySolver.naked_subset,
+			SudokuHumanFriendlySolver.locked_candidate,
+		)
+
+	@staticmethod
+	def solve_step_by_step(sudoku: Sudoku) -> Generator[Tuple[bool, Optional[Sudoku]], Optional[Step], Optional[Sudoku]]:
+		progress = True # yield true first, so that we can write stuffs like: for progress, solution in solve_step_by_step(...): if not progress: break
+		solution = sudoku
 		while True:
-			next_step_func = yield (progress, step)
+			next_step_func = yield (progress, solution)
 			if next_step_func is None:
-				next_step_func = self.choose_next_technic()
-			progress, step = next_step_func(self, step)
-			if step is None:
+				next_step_func = SudokuHumanFriendlySolver.next_technique()
+			progress, solution = next_step_func(solution)
+			if solution is None:
 				return None
-			if all(cell.is_fixed_number() for row in step.board for cell in row):
-				return step
-	def solve(self, sudoku: Sudoku) -> Optional[Sudoku]:
-		for _ in self.solve_step_by_step(sudoku): pass
+			if all(cell.is_fixed_number() for row in solution.board for cell in row):
+				return solution
+
+	@staticmethod
+	def solve(sudoku: Sudoku) -> Tuple[SudokuSolverState, Optional[Sudoku]]:
+		for _ in SudokuHumanFriendlySolver.solve_step_by_step(sudoku): pass
 		try:
-			next(self.solve_step_by_step(sudoku))
+			next(SudokuHumanFriendlySolver.solve_step_by_step(sudoku))
 		except StopIteration as e:
-			return e.value
+			return (SudokuSolverState.SOLVED, e.value)
+		return (SudokuSolverState.INVALID, None)
 
 class SudokuGenerator:
 	@staticmethod
