@@ -165,7 +165,7 @@ class PartialSudoku:
 								if self.board[rr][cc].value[num - 1]:
 									return False
 		return True
-	
+
 	def validate_full(self) -> bool:
 		return self.validate() and self.validate_notes()
 
@@ -543,6 +543,49 @@ class SudokuHumanFriendlySolver:
 				return None
 		return step
 
+class SudokuGenerator:
+	@staticmethod
+	def generate() -> Sudoku:
+		import random
+		dlx = SudokuDancingLinksSolver()
+
+		def generate_unique_puzzle() -> Sudoku:
+			puzzle = Sudoku()
+			positions = [(r, c) for r in range(9) for c in range(9)]
+			random.shuffle(positions)
+			for r, c in positions[:30]:
+				if puzzle.board[r][c].is_fixed_number():
+					continue
+				candidates = puzzle.board[r][c].notes
+				puzzle_old = deepcopy(puzzle)
+				puzzle.fill_number(r, c, random.choice(list(candidates)))
+				if not puzzle.validate():
+					puzzle = puzzle_old
+					continue
+				state, _ = dlx.solve(puzzle)
+				if state == SudokuSolverState.SOLVED:
+					return puzzle
+			# Too many givens, retry generation
+			return SudokuGenerator.generate()
+
+		puzzle = generate_unique_puzzle()
+
+		def further_remove_cells(puzzle: Sudoku) -> Sudoku:
+			positions = [(r, c) for r in range(9) for c in range(9) if puzzle.board[r][c].is_fixed_number()]
+			random.shuffle(positions)
+			for r, c in positions:
+				puzzle_new = deepcopy(puzzle)
+				puzzle_new.board[r][c].value = [True] * 9 # Temporarily remove the number
+				puzzle_new.rebuild_notes() # Rebuild notes to reflect the removal
+				if puzzle == puzzle_new:
+					continue # More removals may help, but I don't know how to handle it
+				state, _ = dlx.solve(puzzle_new)
+				if state == SudokuSolverState.SOLVED:
+					puzzle = puzzle_new
+			return puzzle
+
+		return further_remove_cells(puzzle)
+
 class SudokuInteractive:
 	def __init__(self, sudoku: PartialSudoku):
 		self._sudoku = sudoku
@@ -670,6 +713,12 @@ class Test:
 		multi = Sudoku.deserialize(self.multi)
 		state, solution = SudokuDancingLinksSolver().solve(multi)
 		assert state == SudokuSolverState.MULTI_ANSWER
+
+	def test_puzzle_generation(self):
+		for _ in range(5):
+			puzzle = SudokuGenerator.generate()
+			state, _ = SudokuDancingLinksSolver().solve(puzzle)
+			assert state == SudokuSolverState.SOLVED
 
 if __name__ == "__main__":
 	t = Test()
