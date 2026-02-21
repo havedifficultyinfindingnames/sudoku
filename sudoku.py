@@ -532,7 +532,7 @@ class SudokuDancingLinksSolver:
 
 class SudokuHumanFriendlySolver:
 	Step = Callable[[Sudoku], Tuple[bool, Optional[Sudoku]]]
-	
+
 	@staticmethod
 	def choice(*steps: Step) -> Step:
 		def run(sudoku: Sudoku) -> Tuple[bool, Optional[Sudoku]]:
@@ -544,7 +544,7 @@ class SudokuHumanFriendlySolver:
 					return (True, solution)
 			return (False, sudoku)
 		return run
-	
+
 	@staticmethod
 	def many(step: Step) -> Callable[[Sudoku], Optional[Sudoku]]:
 		def run(sudoku: Sudoku) -> Optional[Sudoku]:
@@ -607,7 +607,7 @@ class SudokuHumanFriendlySolver:
 						return (True, su)
 
 		return (False, sudoku)
-	
+
 	@staticmethod
 	def naked_subset(sudoku: Sudoku) -> Tuple[bool, Optional[Sudoku]]:
 		"""
@@ -716,16 +716,16 @@ class SudokuHumanFriendlySolver:
 		)
 
 	@staticmethod
-	def median_technique() -> Step:
+	def medium_technique() -> Step:
 		return SudokuHumanFriendlySolver.choice(
 			SudokuHumanFriendlySolver.simple_technique(),
 			SudokuHumanFriendlySolver.identity
 		)
-	
+
 	@staticmethod
 	def hard_technique() -> Step:
 		return SudokuHumanFriendlySolver.choice(
-			SudokuHumanFriendlySolver.median_technique(),
+			SudokuHumanFriendlySolver.medium_technique(),
 			SudokuHumanFriendlySolver.identity
 		)
 
@@ -763,7 +763,7 @@ class SudokuHumanFriendlySolver:
 class SudokuGenerator:
 	_seed = None
 
-	def generate(self, difficulty: Literal["simple", "median", "hard", "impossible"] = "simple") -> Sudoku:
+	def generate(self, difficulty: Literal["simple", "medium", "hard", "impossible"] = "simple") -> Sudoku:
 		import random
 		random.seed(self._seed)
 
@@ -806,10 +806,10 @@ class SudokuGenerator:
 		match difficulty:
 			case "simple":
 				solver = SudokuHumanFriendlySolver.identity
-			case "median":
+			case "medium":
 				solver = SudokuHumanFriendlySolver.simple_technique()
 			case "hard":
-				solver = SudokuHumanFriendlySolver.median_technique()
+				solver = SudokuHumanFriendlySolver.medium_technique()
 			case "impossible":
 				solver = SudokuHumanFriendlySolver.hard_technique()
 			case _:
