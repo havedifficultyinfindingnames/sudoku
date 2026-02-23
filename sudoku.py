@@ -1,8 +1,9 @@
 from typing import *
 from copy import *
 from enum import IntEnum
-from itertools import combinations
+from itertools import combinations, groupby
 from dataclasses import dataclass, field
+from collections import deque
 
 # Contract that SudokuInt is an int between 1 and 9 inclusive, no enforcement to check
 SudokuInt = int
@@ -219,7 +220,7 @@ class Sudoku(PartialSudoku):
 				super().__init__(*args, **kwargs)
 		if validated or (not args and not kwargs):
 			return
-		if not self.validate():
+		if not PartialSudoku.validate(self):
 			raise ValueError("Invalid Sudoku board: violates Sudoku rules.")
 		# envalidate notes
 		for r in range(9):
@@ -564,7 +565,7 @@ class SudokuHumanFriendlySolver:
 	@staticmethod
 	def hidden_subset(sudoku: Sudoku) -> Tuple[bool, Optional[Sudoku]]:
 		"""
-		Hidden Subset is a technique that identifies a subset of k digits that only appear in k cells within a unit (row, column, or box). If such a subset is found, those k cells must contain those k digits, and any other candidates can be removed from those cells.
+		Hidden Subset is a technique that identifies a subset of k digits that only appear in k cells within a unit (row, column, or box). If such a pattern is found, those k cells must contain those k digits, and any other candidates can be removed from those cells.
 		"""
 		# k can be at most 9 // 2
 		for k in range(1, 5):
@@ -611,13 +612,13 @@ class SudokuHumanFriendlySolver:
 	@staticmethod
 	def naked_subset(sudoku: Sudoku) -> Tuple[bool, Optional[Sudoku]]:
 		"""
-		Naked Subset is a technique that identifies a subset of k cells within a unit (row, column, or box) that contain only k candidates in total. If such a subset is found, those k candidates must be placed in those k cells, and any other candidates can be removed from those cells.
+		Naked Subset is a technique that identifies a subset of k cells within a unit (row, column, or box) that contain only k candidates in total. If such a pattern is found, those k candidates must be placed in those k cells, and any other candidates can be removed from those cells.
 		"""
 		# k can be at most 9 // 2
 		# k == 1 (which is naked single) is already handled by Cell
 		for k in range(2, 5):
 			for unit in Sudoku.iter_units():
-				cells = [(r, c) for r, c in unit if not sudoku.board[r][c].is_fixed_number()]
+				cells = [(r, c) for r, c in unit if not sudoku.board[r][c].is_fixed_number() and 0 < len(sudoku.board[r][c].notes) <= k]
 				if len(cells) < k:
 					continue
 				for cs in combinations(cells, k):
@@ -650,7 +651,7 @@ class SudokuHumanFriendlySolver:
 	@staticmethod
 	def locked_candidate(sudoku: Sudoku) -> Tuple[bool, Optional[Sudoku]]:
 		"""
-		Locked Candidate is a technique that identifies a candidate digit that is confined to a single row or column within a box. If such a candidate is found, it can be removed from the corresponding row or column outside of that box.
+		Locked Candidate is a technique that identifies a candidate digit that is confined to a single row or column within a box. If such a pattern is found, it can be removed from the corresponding row or column outside of that box.
 		"""
 		for br in range(3):
 			for bc in range(3):
@@ -707,6 +708,243 @@ class SudokuHumanFriendlySolver:
 		return (False, sudoku)
 
 	@staticmethod
+	def unfinned_fish(sudoku: Sudoku) -> Tuple[bool, Optional[Sudoku]]:
+		"""
+		Unfinned Fish is a generalization of the X-Wing, Swordfish and Jellyfish techniques. It identifies a candidate digit that forms a pattern across multiple rows and columns, where the candidate is confined to a specific set of rows and columns. If such a pattern is found, the candidate can be removed from the corresponding rows or columns outside of that pattern.
+		"""
+		def is_candidate(r: int, c: int, d: int) -> bool:
+			cell = sudoku.board[r][c]
+			return (not cell.is_fixed_number()) and d in cell.notes
+
+		for k in range(2, 5):
+			# Row-based unfinned fish
+			for d in range(1, 10):
+				row_to_cols: Dict[int, List[int]] = {}
+				for r in range(9):
+					cols = [c for c in range(9) if is_candidate(r, c, d)]
+					if 2 <= len(cols) <= k:
+						row_to_cols[r] = cols
+
+				rows = sorted(row_to_cols.keys())
+				if len(rows) < k:
+					continue
+
+				for rs in combinations(rows, k):
+					union_cols = set()
+					for r in rs:
+						union_cols |= set(row_to_cols[r])
+					if len(union_cols) != k:
+						continue
+
+					su = deepcopy(sudoku)
+					changed = False
+					for r in range(9):
+						if r in rs:
+							continue
+						for c in union_cols:
+							cell = su.board[r][c]
+							if cell.is_fixed_number():
+								continue
+							if cell.value[d - 1]:
+								su.delete_note(r, c, d)
+								changed = True
+
+					if changed:
+						if not su.validate():
+							return (False, None)
+						return (True, su)
+
+			# Column-based unfinned fish
+			for d in range(1, 10):
+				col_to_rows: Dict[int, List[int]] = {}
+				for c in range(9):
+					rows = [r for r in range(9) if is_candidate(r, c, d)]
+					if 2 <= len(rows) <= k:
+						col_to_rows[c] = rows
+
+				cols = sorted(col_to_rows.keys())
+				if len(cols) < k:
+					continue
+
+				for cs in combinations(cols, k):
+					union_rows = set()
+					for c in cs:
+						union_rows |= set(col_to_rows[c])
+					if len(union_rows) != k:
+						continue
+
+					su = deepcopy(sudoku)
+					changed = False
+					for c in range(9):
+						if c in cs:
+							continue
+						for r in union_rows:
+							cell = su.board[r][c]
+							if cell.is_fixed_number():
+								continue
+							if cell.value[d - 1]:
+								su.delete_note(r, c, d)
+								changed = True
+
+					if changed:
+						if not su.validate():
+							return (False, None)
+						return (True, su)
+
+		return (False, sudoku)
+
+	@staticmethod
+	def basic_x_chain(sudoku: Sudoku) -> Tuple[bool, Optional[Sudoku]]:
+		"""
+		Basic X-Chain is a technique that identifies a 2nd-order AIC(alternative inference chain) of a single digit. It's a generalization of the Skyscraper, Two-String-Like and Crane techniques. If such a pattern is found, the candidate can be removed from the corresponding cells that see both ends of the chain.
+		"""
+		return SudokuHumanFriendlySolver.x_chain(sudoku, k=2)
+
+	@staticmethod
+	def empty_rectangle(sudoku: Sudoku) -> Tuple[bool, Optional[Sudoku]]:
+		raise NotImplementedError("Empty Rectangle technique is not implemented yet.")
+
+	@staticmethod
+	def bug_plus_1(sudoku: Sudoku) -> Tuple[bool, Optional[Sudoku]]:
+		"""
+		BUG+1 is a uniqueness technique that identifies a pattern where there is only one cell with more than two candidates and all other cells have exactly two candidates. If such a pattern is found, the candidate in the cell that is not part of any pair should be placed in that cell to prevent forming a BUG(binary universal grave).
+		"""
+		cells_not_fixed = [(r, c) for r in range(9) for c in range(9) if not sudoku.board[r][c].is_fixed_number()]
+		group_key = lambda rc: len(sudoku.board[rc[0]][rc[1]].notes)
+		nums_to_cells: Dict[int, List[Tuple[SudokuIndex, SudokuIndex]]] = {key: list(group) for key, group in groupby(sorted(cells_not_fixed, key=group_key), key=group_key)}
+		if not (nums_to_cells.get(2) and nums_to_cells.get(3) and len(nums_to_cells[3]) == 1):
+			return (False, sudoku)
+		r, c = nums_to_cells[3][0]
+		candidates = sudoku.board[r][c].notes
+
+		counts = Counter(
+			d
+			for (rr, cc) in nums_to_cells[2]
+			for d in sudoku.board[rr][cc].notes
+			if d in candidates
+		)
+		unique_candidate = max(counts, key=lambda d: counts[d])
+
+		sudoku_copy = deepcopy(sudoku)
+		sudoku_copy.fill_number(r, c, unique_candidate)
+		return (True, sudoku_copy)
+
+	@staticmethod
+	def finned_fish(sudoku: Sudoku) -> Tuple[bool, Optional[Sudoku]]:
+		raise NotImplementedError("Finned Fish technique is not implemented yet.")
+
+	@staticmethod
+	def x_chain(sudoku: Sudoku, k: int = 0) -> Tuple[bool, Optional[Sudoku]]:
+		"""
+		X-Chain is a technique that identifies an AIC of a single digit. If such a pattern is found, the candidate can be removed from the corresponding cells that see both ends of the chain.
+		"""
+		def is_candidate(r: int, c: int, d: int) -> bool:
+			cell = sudoku.board[r][c]
+			return (not cell.is_fixed_number()) and d in cell.notes
+
+		def peers(r: int, c: int) -> Set[Tuple[int, int]]:
+			ps: Set[Tuple[int, int]] = set()
+			# row
+			for cc in range(9):
+				if cc != c:
+					ps.add((r, cc))
+			# col
+			for rr in range(9):
+				if rr != r:
+					ps.add((rr, c))
+			# box
+			br = (r // 3) * 3
+			bc = (c // 3) * 3
+			for rr in range(br, br + 3):
+				for cc in range(bc, bc + 3):
+					if rr != r or cc != c:
+						ps.add((rr, cc))
+			return ps
+
+		def box_index(r: int, c: int) -> int:
+			return (r // 3) * 3 + (c // 3)
+
+		for d in range(1, 10):
+			# collect all candidates of digit d
+			cands: List[Tuple[int, int]] = [(r, c) for r in range(9) for c in range(9) if is_candidate(r, c, d)]
+			if len(cands) < 4:
+				continue
+
+			# weak neighbors: any other candidate of d that sees this one
+			row_map: Dict[int, List[Tuple[int, int]]] = {r: [] for r in range(9)}
+			col_map: Dict[int, List[Tuple[int, int]]] = {c: [] for c in range(9)}
+			box_map: Dict[int, List[Tuple[int, int]]] = {b: [] for b in range(9)}
+			for (r, c) in cands:
+				row_map[r].append((r, c))
+				col_map[c].append((r, c))
+				box_map[box_index(r, c)].append((r, c))
+
+			weak_neighbors: Dict[Tuple[int, int], Set[Tuple[int, int]]] = {}
+			for (r, c) in cands:
+				nb = set(row_map[r]) | set(col_map[c]) | set(box_map[box_index(r, c)])
+				nb.discard((r, c))
+				weak_neighbors[(r, c)] = nb
+
+			# strong neighbors: conjugate pairs (exactly 2 candidates in a unit)
+			strong_neighbors: Dict[Tuple[int, int], Set[Tuple[int, int]]] = {(r, c): set() for (r, c) in cands}
+			for unit in Sudoku.iter_units():
+				pos = [(r, c) for (r, c) in unit if is_candidate(r, c, d)]
+				if len(pos) == 2:
+					a, b = pos
+					strong_neighbors[a].add(b)
+					strong_neighbors[b].add(a)
+
+			# BFS alternating edges, starting with STRONG; endpoints are reached after an odd number of edges (last edge STRONG)
+			# state: (node, need_strong_next)
+			for start in cands:
+				q = deque([(start, True, 0)])  # need_strong_next=True at start => first edge must be strong
+				visited: Set[Tuple[Tuple[int, int], bool]] = {(start, True)}
+
+				while q:
+					cur, need_strong, dist = q.popleft()
+					nbrs = strong_neighbors[cur] if need_strong else weak_neighbors[cur]
+
+					for nb in nbrs:
+						next_need_strong = not need_strong
+						nd = dist + 1
+						state = (nb, next_need_strong)
+						if state in visited:
+							continue
+						visited.add(state)
+						q.append((nb, next_need_strong, nd))
+
+						# last edge was strong <=> next expected is weak
+						if next_need_strong is False and (k == 0 and nd >= 3 or k > 0 and nd == 2 * k - 1):
+							end = nb
+
+							targets = peers(*start) & peers(*end)
+							if not targets:
+								continue
+
+							# check whether there is anything to eliminate before deepcopy
+							elim_cells = [(rr, cc) for (rr, cc) in targets if is_candidate(rr, cc, d)]
+							if not elim_cells:
+								continue
+
+							su = deepcopy(sudoku)
+							changed = False
+							for (rr, cc) in sorted(elim_cells):
+								# remove digit d from cells that see both ends
+								su.delete_note(rr, cc, d)
+								changed = True
+
+							if changed:
+								if not su.validate():
+									return (False, None)
+								return (True, su)
+
+		return (False, sudoku)
+
+	@staticmethod
+	def unique_rectangle(sudoku: Sudoku) -> Tuple[bool, Optional[Sudoku]]:
+		raise NotImplementedError("Unique Rectangle technique is not implemented yet.")
+
+	@staticmethod
 	def simple_technique() -> Step:
 		return SudokuHumanFriendlySolver.choice(
 			SudokuHumanFriendlySolver.identity,
@@ -719,14 +957,26 @@ class SudokuHumanFriendlySolver:
 	def medium_technique() -> Step:
 		return SudokuHumanFriendlySolver.choice(
 			SudokuHumanFriendlySolver.simple_technique(),
-			SudokuHumanFriendlySolver.identity
+			SudokuHumanFriendlySolver.unfinned_fish,
+			SudokuHumanFriendlySolver.basic_x_chain,
+			SudokuHumanFriendlySolver.empty_rectangle,
 		)
 
 	@staticmethod
 	def hard_technique() -> Step:
 		return SudokuHumanFriendlySolver.choice(
 			SudokuHumanFriendlySolver.medium_technique(),
-			SudokuHumanFriendlySolver.identity
+			SudokuHumanFriendlySolver.finned_fish,
+			SudokuHumanFriendlySolver.x_chain,
+			SudokuHumanFriendlySolver.unique_rectangle,
+			SudokuHumanFriendlySolver.bug_plus_1,
+		)
+
+	@staticmethod
+	def uniqueness_technique() -> Step:
+		return SudokuHumanFriendlySolver.choice(
+			SudokuHumanFriendlySolver.bug_plus_1,
+			SudokuHumanFriendlySolver.unique_rectangle,
 		)
 
 	@staticmethod
@@ -783,7 +1033,7 @@ class SudokuGenerator:
 				state, _ = SudokuDancingLinksSolver.solve(puzzle)
 				if state == SudokuSolverState.SOLVED:
 					return puzzle
-			return self.generate() # Too many givens, regenerate
+			return self.generate(difficulty) # Too many givens, regenerate
 
 		puzzle = generate_unique_puzzle()
 
@@ -955,10 +1205,128 @@ class Test:
 		assert state == SudokuSolverState.MULTI_ANSWER
 
 	def test_puzzle_generation(self):
-		for _ in range(5):
-			puzzle = SudokuGenerator().generate()
-			state, _ = SudokuDancingLinksSolver().solve(puzzle)
-			assert state == SudokuSolverState.SOLVED
+		puzzle = SudokuGenerator().generate()
+		state, _ = SudokuDancingLinksSolver().solve(puzzle)
+		assert state == SudokuSolverState.SOLVED
+
+	def test_solve_hidden_subset(self):
+		def n(*args: int) -> str:
+			return "".join(str(i) if i in args else "." for i in range(1, 10))
+		su = Sudoku.deserialize("".join(map(lambda r: "".join(map(lambda l: n(*l) if isinstance(l, list) else n(l), r)), [
+			[[3,4,5,9], [1,3,5,9], [1,3,4,5], [2,3,9], [3,7,9], [3,4,7], [2,5,6,7,9], 8, [2,6,7,9]],
+			[7, 8, 6, [2,9], 1, 5, [2,9], 4, 3],
+			[[3,4,5,9], [3,5,9], 2, [3,8,9], 6, [3,4,7,8], [5,7,9], 1, [7,9]],
+			[[3,4,5,8], [1,3,5], [1,3,4,5,8], 7, 2, 9, [3,4], 6, [5,8]],
+			[[2,3,4,6,8,9], [2,3,6,7,9], [3,4,8], [1,3,5], [3,5], [1,3,6], [3,4], [2,7,9], [2,8,9]],
+			[[2,3,5,6,9], [2,3,5,6,7,9], [3,5], 4, 8, [3,6], 1, [2,7,9], [2,5,9]],
+			[[2,3,8], 4, [3,8], 6, [3,7,9], [1,3,7,8], [2,8,9], 5, [1,2,9]],
+			[[5,6,8], [5,6], 9, [1,5,8], 4, 2, [6,7,8], 3, [1,6,7]],
+			[1, [2,3,5,6], 7, [3,5,8,9], [3,5,9], [3,8], [2,6,8,9], [2,9], 4],
+		])))
+		progress, so = SudokuHumanFriendlySolver().hidden_subset(su)
+		assert progress and so != su
+
+	def test_solve_naked_subset(self):
+		def n(*args: int) -> str:
+			return "".join(str(i) if i in args else "." for i in range(1, 10))
+		su = Sudoku.deserialize("".join(map(lambda r: "".join(map(lambda l: n(*l) if isinstance(l, list) else n(l), r)), [
+			[[3,7], [5,6], [2,6,7], [3,4], 8, 1, 9, [5,7], [2,4]],
+			[[2,3,5,7,9], 1, [2,7,9], [3,4], 6, [2,7], [2,3,4], [5,7], 8],
+			[[2,3,7], 8, 4, 9, 5, [2,7], [2,3], 6, 1],
+			[[8,9], [4,6], [8,9], 5, 2, 3, [4,7], 1, [6,7]],
+			[[2,6], 3, 5, 7, 1, 4, [2,6], 8, 9],
+			[[1,2,4], 7, [1,2], 8, 9, 6, 5, 3, [2,4]],
+			[[1,8], 9, [6,7], 2, 3, 5, [1,8], 4, [6,7]],
+			[[6,7], 2, 3, 1, 4, 8, [6,7], 9, 5],
+			[[4,5], [4,5], [1,8], 6, 7, 9, [1,8], 2, 3],
+		])))
+		progress, so = SudokuHumanFriendlySolver().naked_subset(su)
+		assert progress and so != su
+
+	def test_solve_locked_candidate(self):
+		def n(*args: int) -> str:
+			return "".join(str(i) if i in args else "." for i in range(1, 10))
+		su = Sudoku.deserialize("".join(map(lambda r: "".join(map(lambda l: n(*l) if isinstance(l, list) else n(l), r)), [
+			[[5,6,7,9], 2, [5,6,7,9], 1, [7,9], 4, 3, 8, [5,6,7,9]],
+			[[3,5,7,9], [3,4,5,9], 8, 2, 6, [3,5], 1, [4,5], [5,7,9]],
+			[1, [3,4,5,9], [5,6,7,9], 8, [7,9], [3,5], [4,9], 2, [5,6,7,9]],
+			[[3,9], 7, 4, [3,9], 8, 6, 5, 1, 2],
+			[8, [3,5], 1, [3,5], 2, 7, 6, 9, 4],
+			[[5,9], 6, 2, [5,9], 4, 1, 7, 3, 8],
+			[[5,6,7,9], [5,9], [5,6,7,9], [4,6], 1, 2, 8, [4,5], 3],
+			[4, 8, 3, 7, 5, 9, 2, 6, 1],
+			[2, 1, [5,6], [4,6], 3, 8, [4,9], 7, [5,9]],
+		])))
+		progress, so = SudokuHumanFriendlySolver().locked_candidate(su)
+		assert progress and so != su
+
+	def test_solve_unfinned_fish(self):
+		def n(*args: int) -> str:
+			return "".join(str(i) if i in args else "." for i in range(1, 10))
+		su = Sudoku.deserialize("".join(map(lambda r: "".join(map(lambda l: n(*l) if isinstance(l, list) else n(l), r)), [
+			[[2,4], 7, 1, 3, 6, [2,4], 9, 5, 8],
+			[[2,3,4,8], 6, [2,3,4,8], 9, [2,5], [4,5], [2,3], 1, 7],
+			[[2,3,5], 9, [2,3,5], 1, 8, 7, 6, [2,3], 4],
+			[[2,5], 3, 6, 7, 4, 1, 8, 9, [2,5]],
+			[7, [4,8], [4,8], [2,5], [2,5], 9, 1, 6, 3],
+			[9, 1, [2,5], 8, 3, 6, 4, 7, [2,5]],
+			[1, 5, [3,8], 4, 9, [2,3,8], 7, [2,3,8], 6],
+			[[3,4,8], [2,4,8], 7, 6, 1, [2,3,5,8], [2,3,5], [2,3,8], 9],
+			[6, [2,8], 9, [2,5], 7, [2,3,5,8], [2,3,5], 4, 1],
+		])))
+		progress, so = SudokuHumanFriendlySolver().unfinned_fish(su)
+		assert progress and so != su
+
+	def test_solve_bug_plus_1(self):
+		def n(*args: int) -> str:
+			return "".join(str(i) if i in args else "." for i in range(1, 10))
+		su = Sudoku.deserialize("".join(map(lambda r: "".join(map(lambda l: n(*l) if isinstance(l, list) else n(l), r)), [
+			[[2,6], 7, 8, [1,6,9], [2,9], [1,9], 5, 3, 4],
+			[[4,6], 5, 1, [4,6], 3, 8, 9, 7, 2],
+			[[2,4], 9, 3, 7, [2,5], [4,5], 1, 6, 8],
+			[5, 1, 4, [2,9], 6, [2,9], 7, 8, 3],
+			[3, 8, 2, [1,5], 7, [1,5], 4, 9, 6],
+			[9, 6, 7, 8, 4, 3, 2, 1, 5],
+			[8, 2, 6, [5,9], [5,9], 7, 3, 4, 1],
+			[7, 4, 5, 3, 1, 6, 8, 2, 9],
+			[1, 3, 9, [2,4], 8, [2,4], 6, 5, 7],
+		])))
+		progress, so = SudokuHumanFriendlySolver().bug_plus_1(su)
+		assert progress and so != su
+
+	def test_solve_basic_x_chain(self):
+		def n(*args: int) -> str:
+			return "".join(str(i) if i in args else "." for i in range(1, 10))
+		su = Sudoku.deserialize("".join(map(lambda r: "".join(map(lambda l: n(*l) if isinstance(l, list) else n(l), r)), [
+			[[6,8],[2,6,8], 4, 1, 3, [2,8], 9, 7, 5],
+			[9, [7,8], 1, [5,7], [5,7,8], 4, 6, 2, 3],
+			[[3,5,7], [2,3,7], [5,7], [2,9], 6, [2,7,9], 1, 8, 4],
+			[[4,6,7], 1, 2, [6,9], [4,7,9], 3, [4,7], 5, 8],
+			[[4,5,6,7,8], [4,6,7,8], 9, [2,6], [4,5,7,8], [2,7,8], [4,7], 3, 1],
+			[[3,4,8], [3,4,8], [5,7], [5,7], [4,8], 1, 2, 9, 6],
+			[[4,7], [4,7], 3, 8, 2, 6, 5, 1, 9],
+			[2, 9, 8, 4, 1, 5, 3, 6, 7],
+			[1, 5, 6, 3, [7,9], [7,9], 8, 4, 2],
+		])))
+		progress, so = SudokuHumanFriendlySolver().basic_x_chain(su)
+		assert progress and so != su
+
+	def test_solve_x_chain(self):
+		def n(*args: int) -> str:
+			return "".join(str(i) if i in args else "." for i in range(1, 10))
+		su = Sudoku.deserialize("".join(map(lambda r: "".join(map(lambda l: n(*l) if isinstance(l, list) else n(l), r)), [
+			[[3,8], 7, 2, 5, [3,8], 6, 1, 9, 4],
+			[6, 4, 5, 1, 2, 9, 8, 3, 7],
+			[9, 1, [3,8], [4,7], [3,4,8], [3,7], 2, 5, 6],
+			[[7,8], 2, 6, [7,8], 9, 1, 5, 4, 3],
+			[[3,5], 9, [3,4], 6, [3,4,5], 2, 7, 8, 1],
+			[1, [3,5,8], [3,4,7,8], [4,7,8], [3,4,5], [3,7], 9, 6, 2],
+			[4, 6, 1, 9, 7, 5, 3, 2, 8],
+			[[3,5,7], [3,5], [3,7,9], 2, 6, 8, 4, 1, [5,9]],
+			[2, [5,8], [8,9], 3, 1, 4, 6, 7, [5,9]],
+		])))
+		progress, so = SudokuHumanFriendlySolver().x_chain(su)
+		assert progress and so != su
 
 if __name__ == "__main__":
 	t = Test()
